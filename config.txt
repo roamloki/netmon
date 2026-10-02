@@ -1,0 +1,17 @@
+# 网络监控目标配置
+# 每行一个目标：名称,IP或域名,类型
+# 类型可选: local(局域网/网关) / internet(外网) / custom(自定义特定目标)
+# 修改后保存即自动生效（无需重启监控）
+
+网关,192.168.1.1,local
+外网-阿里DNS,223.5.5.5,internet
+外网-腾讯DNS,119.29.29.29,internet
+hk-01,203.0.113.1,internet
+hk-02,203.0.113.2,internet
+hk-03,203.0.113.3,internet
+cn-01,203.0.113.4,internet
+
+
+# 自定义特定目标示例（去掉#启用）：
+# 矿机,192.168.1.200,custom
+# 币安,www.binance.com,custom
