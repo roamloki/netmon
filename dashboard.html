@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>网络波动监控</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"Microsoft YaHei",sans-serif;background:#0f172a;color:#e2e8f0;padding:16px}
+h1{font-size:20px;margin-bottom:4px}
+.sub{color:#94a3b8;font-size:12px;margin-bottom:14px}
+.cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 18px;min-width:180px;cursor:pointer;transition:border-color .15s}
+.card.sel{border-color:#3b82f6;box-shadow:0 0 0 1px #3b82f6 inset}
+.card:hover{border-color:#475569}
+.card .name{font-size:13px;color:#94a3b8;margin-bottom:6px}
+.card .rtt{font-size:26px;font-weight:bold}
+.card .host{font-size:11px;color:#64748b;margin-top:4px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.ok{background:#22c55e}.warn{background:#f59e0b}.down{background:#ef4444}
+.panel{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px;margin-bottom:16px}
+.panel h2{font-size:14px;color:#cbd5e1;margin-bottom:10px}
+#chartWrap{position:relative;width:100%}
+#chart{width:100%;height:340px;display:block;cursor:crosshair}
+#tip{position:absolute;display:none;pointer-events:none;background:rgba(15,23,42,0.95);border:1px solid #475569;border-radius:8px;padding:8px 12px;font-size:12px;min-width:150px;z-index:10;box-shadow:0 4px 12px rgba(0,0,0,0.4)}
+#tip .tt{color:#cbd5e1;margin-bottom:5px;font-weight:bold}
+#tip .row{color:#e2e8f0;margin:2px 0}
+#tip .row i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+#tip .no{color:#64748b}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #334155}
+th{color:#94a3b8;font-weight:normal}
+td .et{color:#f59e0b}.er{color:#22c55e}.ed{color:#ef4444}
+#events{max-height:300px;overflow-y:auto}
+.legend{font-size:12px;color:#94a3b8;margin-bottom:8px}
+.legend span{margin-right:14px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:middle}
+.ranges{margin-bottom:10px}
+.ranges button{background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:6px;padding:5px 14px;margin-right:8px;cursor:pointer;font-size:13px}
+.ranges button.on{background:#3b82f6;border-color:#3b82f6;color:#fff}
+.evtags{margin-bottom:8px;display:flex;flex-wrap:wrap;gap:6px}
+.evtag{background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:6px;padding:3px 12px;font-size:12px;cursor:pointer}
+.evtag.on{background:#3b82f6;border-color:#3b82f6;color:#fff}
+.ph{display:flex;align-items:center;margin-bottom:10px}
+.ph h2{margin:0}
+#dateSel,#evdateSel{margin-left:auto;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 8px;font-size:13px;cursor:pointer;color-scheme:dark}
+</style>
+</head>
+<body>
+<h1>网络波动监控</h1>
+<div class="sub" id="clock">加载中...</div>
+<div class="cards" id="cards"></div>
+<div class="panel">
+  <div class="ph"><h2>延迟曲线</h2><input type="date" id="dateSel" title="选择日期查看当天全天曲线"></div>
+  <div class="legend" id="legend"></div>
+  <div class="ranges" id="ranges">
+    <button data-m="15" class="on">15分钟</button>
+    <button data-m="60">1小时</button>
+    <button data-m="1440">每天</button>
+  </div>
+  <div id="chartWrap">
+    <canvas id="chart"></canvas>
+    <div id="tip"></div>
+  </div>
+</div>
+<div class="panel">
+  <div class="ph"><h2>波动事件记录</h2><input type="date" id="evdateSel" title="选择日期查看当天事件记录，清空日期回到实时"></div>
+  <div class="evtags" id="evtags"></div>
+  <div id="events"><table><thead><tr><th>时间</th><th>目标</th><th>类型</th><th>详情</th></tr></thead><tbody id="evbody"></tbody></table></div>
+</div>
+<script>
+var COLORS = ["#60a5fa","#f472b6","#4ade80","#fbbf24","#a78bfa","#34d399","#f87171","#22d3ee"];
+var TARGETS = [], STATE = [], HIST = {};
+var RANGE = 15;            // minutes
+var FILTER = null;         // target name to show only one, null = all
+var DAY = null;            // "YYYY-MM-DD" for historical full-day view, null = live
+var EVFILTER = null;       // event table target filter
+var EVDAY = null;          // event table date "YYYY-MM-DD", null = live
+var padL = 56, padR = 12, padT = 14, padB = 28;
+var HOVER = null;
+
+function shownTargets(){ return FILTER ? TARGETS.filter(function(t){return t.name===FILTER;}) : TARGETS; }
+function getX0(){
+  if(DAY) return new Date(DAY+"T00:00:00").getTime();
+  var now=Date.now(), span=RANGE*60*1000, x0=now-span;
+  var earliest=null;
+  shownTargets().forEach(function(t){if(HIST[t.name]&&HIST[t.name].length){var e=HIST[t.name][0].t;if(earliest===null||e<earliest)earliest=e;}});
+  if(earliest!==null&&earliest>x0)x0=earliest-60000;
+  return x0;
+}
+function selCard(name){
+  FILTER = (FILTER===name) ? null : name;
+  renderCards(); draw();
+}
+
+var DATADIR="";
+function fmtClock(){var d=new Date();var p=function(n){return n<10?"0"+n:n};document.getElementById("clock").textContent="当前时间 "+d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())+"  ·  每5秒采样一轮  ·  数据存 "+(DATADIR||"加载中...");}
+setInterval(fmtClock,1000);
+fetch("/api/info").then(function(r){return r.json()}).then(function(i){DATADIR=i.data+"\\";fmtClock();}).catch(function(){});
+
+function todayStr(){var d=new Date();var p=function(n){return n<10?"0"+n:n};return p(d.getFullYear())+"-"+p(d.getMonth()+1)+"-"+p(d.getDate());}
+function syncRangeUI(m){
+  document.querySelectorAll("#ranges button").forEach(function(x){x.classList.toggle("on",parseInt(x.getAttribute("data-m"))===m);});
+}
+function setRange(m){
+  RANGE=m; DAY=null;
+  var ds=document.getElementById("dateSel"); if(ds) ds.value="";
+  syncRangeUI(m);
+  HIST={}; loadHistory();
+}
+document.getElementById("ranges").addEventListener("click",function(e){
+  var b=e.target.closest("button"); if(!b)return;
+  setRange(parseInt(b.getAttribute("data-m")));
+});
+document.getElementById("dateSel").addEventListener("change",function(){
+  var v=this.value; if(!v)return;
+  DAY=v; RANGE=1440; syncRangeUI(1440);
+  HIST={}; loadDayHistory();
+});
+document.getElementById("evdateSel").addEventListener("change",function(){
+  EVDAY=this.value||null;
+  loadEvents();
+});
+function loadDayHistory(){
+  TARGETS.forEach(function(t){
+    fetch("/api/history?name="+encodeURIComponent(t.name)+"&date="+DAY).then(function(r){return r.json()}).then(function(arr){HIST[t.name]=arr;draw();});
+  });
+}
+
+function loadTargets(){
+  return fetch("/api/targets").then(function(r){return r.json()}).then(function(t){
+    TARGETS=t;
+    var lg=document.getElementById("legend");lg.innerHTML="";
+    t.forEach(function(x,i){var s=document.createElement("span");var c=document.createElement("i");c.style.background=COLORS[i%COLORS.length];s.appendChild(c);s.appendChild(document.createTextNode(x.name+" ("+x.host+")"));lg.appendChild(s);});
+    buildEvTags();
+  });
+}
+function buildEvTags(){
+  var el=document.getElementById("evtags");el.innerHTML="";
+  function mk(label,on){
+    var s=document.createElement("span");
+    s.className="evtag"+(on?" on":"");
+    s.textContent=label;
+    return s;
+  }
+  var a=mk("全部",EVFILTER===null);
+  a.onclick=function(){EVFILTER=null;buildEvTags();loadEvents();};
+  el.appendChild(a);
+  TARGETS.forEach(function(t){
+    var s=mk(t.name,EVFILTER===t.name);
+    s.onclick=function(){EVFILTER=(EVFILTER===t.name)?null:t.name;buildEvTags();loadEvents();};
+    el.appendChild(s);
+  });
+}
+
+function renderCards(){
+  var c=document.getElementById("cards");c.innerHTML="";
+  STATE.forEach(function(s,i){
+    var cls = s.ok?(s.down>=1?"warn":"ok"):"down";
+    var host = TARGETS[i]?TARGETS[i].host:"";
+    var big, small;
+    if(!s.ok){
+      big="断线"; small=host+" · 连续超时"+s.down+"次";
+    } else if(s.avg!=null){
+      big=s.avg+" ms"; small=host+" · 当前"+(s.rtt==null?"超时":s.rtt+"ms");
+    } else {
+      big="采集中"; small=host;
+    }
+    var sel = (FILTER===s.name)?' sel':'';
+    c.innerHTML+='<div class="card'+sel+'" onclick="selCard(\''+s.name+'\')"><div class="name"><span class="dot '+cls+'"></span>'+s.name+'</div><div class="rtt">'+big+'</div><div class="host">'+small+'</div></div>';
+  });
+}
+
+function loadHistory(){
+  TARGETS.forEach(function(t){
+    fetch("/api/history?name="+encodeURIComponent(t.name)+"&minutes="+RANGE).then(function(r){return r.json()}).then(function(arr){HIST[t.name]=arr;draw();});
+  });
+}
+
+function findStep(arr, time){
+  // value of the step at 'time': last sample with t<=time (matches step line exactly)
+  var lo=0, hi=arr.length-1, best=null;
+  while(lo<=hi){
+    var mid=(lo+hi)>>1;
+    if(arr[mid].t<=time){best=arr[mid];lo=mid+1;}else hi=mid-1;
+  }
+  return best;
+}
+
+function draw(){
+  var cv=document.getElementById("chart"), ctx=cv.getContext("2d");
+  var dw=Math.floor(cv.clientWidth*devicePixelRatio), dh=Math.floor(cv.clientHeight*devicePixelRatio);
+  if(cv.width!==dw)cv.width=dw; if(cv.height!==dh)cv.height=dh;
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  var w=cv.clientWidth,h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  var now=Date.now(), span=DAY?86400000:RANGE*60*1000;
+  var sh=shownTargets();
+  var x0=getX0();
+  var all=[];
+  sh.forEach(function(t){if(HIST[t.name]){HIST[t.name].forEach(function(p){if(p.r!=null)all.push(p.r);});}});
+  var raw=Math.max(50,Math.max.apply(null,all.concat([50]))*1.15);
+  var steps=[10,25,50,100,250,500];
+  var step=50, maxR=50;
+  for(var si=0;si<steps.length;si++){var m=Math.ceil(raw/steps[si])*steps[si];if(m>=raw){step=steps[si];maxR=m;break;}}
+  // grid
+  ctx.strokeStyle="#334155";ctx.fillStyle="#94a3b8";ctx.font="11px sans-serif";
+  for(var v=0;v<=maxR;v+=step){
+    var y=padT+(h-padT-padB)*(1-v/maxR);
+    ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(w-padR,y);ctx.stroke();
+    ctx.fillText(v+"ms",6,y+4);
+  }
+  var ticks=6, p2s=function(n){return n<10?"0"+n:n;};
+  var labFmt=function(d){
+    if(span>4*3600*1000) return p2s(d.getMonth()+1)+"-"+p2s(d.getDate())+" "+p2s(d.getHours())+":"+p2s(d.getMinutes());
+    return p2s(d.getHours())+":"+p2s(d.getMinutes());
+  };
+  for(var g2=0;g2<=ticks;g2++){
+    var x=padL+(w-padL-padR)*g2/ticks;
+    var d=new Date(x0+span*g2/ticks);
+    ctx.strokeStyle="#1e293b";ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,h-padB);ctx.stroke();
+    var lbl=labFmt(d);
+    ctx.fillText(lbl,x-20,h-padB+16);ctx.strokeStyle="#334155";
+  }
+  // series (step line: value holds until next sample, matches tooltip exactly)
+  sh.forEach(function(t){
+    var i=TARGETS.indexOf(t);
+    var arr=HIST[t.name]||[];
+    ctx.strokeStyle=COLORS[(i<0?0:i)%COLORS.length];ctx.lineWidth=1.6;ctx.beginPath();
+    var started=false, prevY=0;
+    arr.forEach(function(p){
+      var x=padL+(w-padL-padR)*((p.t-x0)/span);
+      var y=padT+(h-padT-padB)*(1-(p.r==null?0:Math.min(p.r,maxR)/maxR));
+      if(x<padL)return;
+      if(p.r==null){started=false;return;}
+      if(!started){ctx.moveTo(x,y);started=true;}
+      else{ctx.lineTo(x,prevY);ctx.lineTo(x,y);}
+      prevY=y;
+    });
+    ctx.stroke();
+  });
+  // hover
+  var tip=document.getElementById("tip");
+  if(HOVER && HOVER.x>=padL && HOVER.x<=w-padR){
+    ctx.strokeStyle="rgba(148,163,184,0.7)";ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.moveTo(HOVER.x,padT);ctx.lineTo(HOVER.x,h-padB);ctx.stroke();
+    ctx.setLineDash([]);
+    var html="", any=false;
+    var htime=x0+HOVER.rel*span;
+    sh.forEach(function(t){
+      var i=TARGETS.indexOf(t);
+      var arr=HIST[t.name]||[];
+      var p=findStep(arr,htime);
+      if(p){
+        var v=p.r==null?"超时":(p.r+" ms");
+        var col=(p.r==null)?"#64748b":COLORS[(i<0?0:i)%COLORS.length];
+        html+='<div class="row"><i style="background:'+col+'"></i>'+t.name+'：<b>'+v+'</b></div>';
+        any=true;
+      }
+    });
+    if(any){
+      var d=new Date(htime);
+      var p2=function(n){return n<10?"0"+n:n};
+      tip.innerHTML='<div class="tt">'+d.getFullYear()+"-"+p2(d.getMonth()+1)+"-"+p2(d.getDate())+" "+p2(d.getHours())+":"+p2(d.getMinutes())+":"+p2(d.getSeconds())+'</div>'+html;
+      var wrap=document.getElementById("chartWrap").getBoundingClientRect();
+      var tx=HOVER.x+14, ty=HOVER.y-80;
+      if(tx+170>w)tx=HOVER.x-180;
+      if(ty<0)ty=HOVER.y+20;
+      tip.style.left=tx+"px"; tip.style.top=ty+"px"; tip.style.display="block";
+    } else { tip.style.display="none"; }
+  } else { tip.style.display="none"; }
+}
+
+var cv=document.getElementById("chart");
+cv.addEventListener("mousemove",function(e){
+  var rect=cv.getBoundingClientRect();
+  var mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  var span=DAY?86400000:RANGE*60*1000;
+  var rel=(mx-padL)/(cv.clientWidth-padL-padR);
+  HOVER={x:mx,y:my,rel:rel};
+  draw();
+});
+cv.addEventListener("mouseleave",function(){HOVER=null;draw();});
+
+function loadNow(){
+  fetch("/api/now").then(function(r){return r.json()}).then(function(d){
+    STATE=d.targets;renderCards();
+  });
+}
+function loadEvents(){
+  var url = EVDAY ? ("/api/events?date=" + EVDAY) : "/api/events";
+  fetch(url).then(function(r){return r.json()}).then(function(ev){
+    var b=document.getElementById("evbody");b.innerHTML="";
+    var list = EVFILTER ? ev.filter(function(e){return e.target===EVFILTER;}) : ev;
+    if(!list.length){b.innerHTML='<tr><td colspan="4">'+(EVFILTER?"该目标暂无事件":"暂无波动事件")+'</td></tr>';return;}
+    list.slice().reverse().forEach(function(e){
+      var cls=e.type.indexOf("恢复")>=0?"er":(e.type.indexOf("波动")>=0?"et":"ed");
+      b.innerHTML+='<tr><td>'+e.t+'</td><td>'+e.target+'</td><td class="'+cls+'">'+e.type+'</td><td>'+e.detail+'</td></tr>';
+    });
+  });
+}
+
+loadTargets().then(function(){
+  loadNow();
+  if(DAY) loadDayHistory(); else loadHistory();
+  loadEvents();
+}).catch(function(){
+  document.getElementById("clock").textContent="无法连接监控服务，请先运行「启动网络监控.bat」";
+});
+setInterval(loadNow,5000);
+setInterval(function(){ if(!EVDAY) loadEvents(); },10000);
+setInterval(function(){ if(DAY){ if(DAY===todayStr()) loadDayHistory(); } else { loadHistory(); } },30000);
+</script>
+</body>
+</html>
